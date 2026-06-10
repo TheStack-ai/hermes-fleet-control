@@ -1,18 +1,33 @@
-# Local/runtime outputs — do not publish machine snapshots.
-runtime/*.txt
-runtime/*.json
-runtime/*.log
-
-# Local planning/context artifacts — keep them on the operator machine only.
-CONTEXT.md
-.omx/
-
-# Python/editor noise
-__pycache__/
-*.pyc
-.pytest_cache/
-.coverage
-htmlcov/
+# macOS
 .DS_Store
-*.egg-info/
-.venv/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+DerivedData/
+.build/
+
+# Secrets / local config / runtime
+.env
+*.env
+secrets/
+*.token
+*.key
+auth.json
+*.auth.json
+config/fleet.local.yaml
+runtime/**
+!runtime/
+!runtime/.gitkeep
+
+# Local agent/operator state
+.omx/
+.hermes/
+
+# Logs / generated
+*.log
+*.tmp
+.pytest_cache/
+__pycache__/
+*.py[cod]
+reports/generated/
+dist/

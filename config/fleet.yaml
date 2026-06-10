@@ -1,0 +1,7 @@
+servers:
+  local:
+    display: Local Hermes profiles
+    profiles:
+      - profile: default
+        display: Default
+        critical: true
