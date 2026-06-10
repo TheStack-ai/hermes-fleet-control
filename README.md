@@ -9,6 +9,7 @@ It has two layers:
 
 ## What it does
 
+- Auto-detects local Hermes profiles on first launch when no private manifest exists.
 - Reads a fleet manifest and summarizes Hermes profile health.
 - Separates **Discord gateway health** from **model/provider auth health**.
 - Shows metadata-only auth state; it never displays raw tokens.
@@ -24,7 +25,7 @@ cd hermes-fleet-control
 python3 -m pytest -q
 ```
 
-Create your local fleet manifest by copying the example:
+On first launch, Fleet Control auto-detects local Hermes profiles from `~/.hermes` and `~/.hermes/profiles/*` when no private manifest exists. For a curated fleet view, create your local manifest by copying the example:
 
 ```bash
 cp config/fleet.yaml config/fleet.local.yaml

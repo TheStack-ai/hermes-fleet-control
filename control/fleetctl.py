@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import json
 import re
@@ -19,10 +20,11 @@ if __package__ is None or __package__ == "":
 from control.audit_log import DEFAULT_AUDIT_LOG, append_action_entry, build_action_entry, build_audit_summary
 from control.gateway_actions import ActionBlocked, execute_plan, plan_action
 from control.auth_health import build_auth_health, inspect_profile_codex_auth
+from control.discovery import auto_discovered_manifest, is_public_default_manifest
 from control.hermes_profiles import launchd_pid_map, summarize_profile
 from control.manifest import load_manifest
 from control.network_checks import check_discord_network
-from control.paths import auth_repair_script_dir, codex_auth_file, default_manifest_path, hermes_executable, profiles_root, user_home, launch_plist_path
+from control.paths import auth_repair_script_dir, codex_auth_file, default_manifest_path, hermes_executable, hermes_home, profiles_root, repo_root, user_home, launch_plist_path
 from control.redaction import RedactionError, leak_guard, redact_text
 from scripts.launchagent import disable as launchagent_disable, enable as launchagent_enable, install as launchagent_install, launchagent_status, uninstall as launchagent_uninstall, write_plist
 DEFAULT_MANIFEST = default_manifest_path()
@@ -35,8 +37,38 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def build_status(args: argparse.Namespace) -> dict[str, Any]:
+def _should_auto_discover(args: argparse.Namespace, manifest: dict[str, Any]) -> bool:
+    if getattr(args, "no_auto_discover", False):
+        return False
+    if os.environ.get("HERMES_FLEET_MANIFEST"):
+        return False
+    if (repo_root() / "config" / "fleet.local.yaml").exists():
+        return False
+    return is_public_default_manifest(manifest)
+
+
+def _load_effective_manifest(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
     manifest = load_manifest(Path(args.manifest))
+    if _should_auto_discover(args, manifest):
+        discovered = auto_discovered_manifest(hermes_home(), Path(args.profiles_root))
+        if discovered:
+            return discovered, "auto_discovery"
+    return manifest, "manifest"
+
+
+def _profile_root_for_item(item: dict[str, Any], args: argparse.Namespace) -> Path:
+    explicit = item.get("profile_root")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    name = str(item["profile"])
+    candidate = Path(args.profiles_root) / name
+    if name == "default" and not candidate.exists():
+        return hermes_home()
+    return candidate
+
+
+def build_status(args: argparse.Namespace) -> dict[str, Any]:
+    manifest, manifest_source = _load_effective_manifest(args)
     pid_map = {} if args.profiles_root != str(DEFAULT_PROFILES_ROOT) else launchd_pid_map()
     servers = []
     for key, server in manifest["servers"].items():
@@ -46,8 +78,9 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         counts = {"healthy": 0, "degraded": 0, "stopped": 0, "busy": 0, "unknown": 0}
         for item in server.get("profiles", []):
             name = item["profile"]
-            summary = summarize_profile(Path(args.profiles_root) / name, name, launchd_pid_present=pid_map.get(name, True))
-            summary["auth"] = inspect_profile_codex_auth(Path(args.profiles_root) / name)
+            profile_root = _profile_root_for_item(item, args)
+            summary = summarize_profile(profile_root, name, launchd_pid_present=pid_map.get(name, True))
+            summary["auth"] = inspect_profile_codex_auth(profile_root)
             summary["display"] = item.get("display", name)
             summary["critical"] = bool(item.get("critical", False))
             profiles.append(summary)
@@ -70,7 +103,7 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
         env_files = getattr(args, "env_file", None)
         auth_health = build_auth_health(Path(args.auth_file), env_paths=[Path(p) for p in env_files] if env_files else None)
     audit = build_audit_summary(Path(args.audit_log), limit=getattr(args, "audit_limit", 5))
-    return {"ok": True, "generated_at": now_iso(), "network": network, "auth_health": auth_health, "audit": audit, "servers": servers}
+    return {"ok": True, "generated_at": now_iso(), "manifest_source": manifest_source, "network": network, "auth_health": auth_health, "audit": audit, "servers": servers}
 
 
 def _profiles_from_status(status: dict[str, Any], group: str | None, profile: str | None) -> list[dict[str, Any]]:
@@ -202,7 +235,7 @@ def _open_terminal(script: str, profile: str, action: str) -> Path:
 
 
 def auth_repair_command(args: argparse.Namespace) -> dict[str, Any]:
-    manifest = load_manifest(Path(args.manifest))
+    manifest, _ = _load_effective_manifest(args)
     allowed = _manifest_profile_names(manifest)
     if args.profile not in allowed:
         return {"ok": False, "error": "unknown_profile", "message": f"profile not in fleet manifest: {args.profile}"}
@@ -306,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--skip-auth", action="store_true")
     common.add_argument("--audit-log", default=str(DEFAULT_AUDIT_LOG))
     common.add_argument("--audit-limit", type=int, default=5)
+    common.add_argument("--no-auto-discover", action="store_true", help="use the manifest exactly; do not auto-discover local Hermes profiles")
 
     sp = sub.add_parser("status", parents=[common])
     sp.add_argument("--json", action="store_true")
@@ -325,6 +359,8 @@ def main(argv: list[str] | None = None) -> int:
 
     arp = sub.add_parser("auth-repair")
     arp.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    arp.add_argument("--profiles-root", default=str(DEFAULT_PROFILES_ROOT))
+    arp.add_argument("--no-auto-discover", action="store_true")
     arp.add_argument("--profile", required=True)
     arp.add_argument("--action", dest="auth_action", choices=["reauth", "reauth-manual", "smoke", "restart"], default="reauth")
     arp.add_argument("--open-terminal", action="store_true")
