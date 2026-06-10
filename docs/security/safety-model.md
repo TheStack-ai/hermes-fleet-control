@@ -38,7 +38,7 @@ Allowed metadata:
 | Stop gateway | confirmation | local side effect |
 | Force restart | blocked by default | explicit local confirmation |
 | Token repair | P1 only | explicit local terminal/browser action; no raw token display |
-| Discord channel/role mutation | forbidden | separate DD approval outside app |
+| Discord channel/role mutation | forbidden | separate operator approval outside app |
 
 ## Redaction patterns
 

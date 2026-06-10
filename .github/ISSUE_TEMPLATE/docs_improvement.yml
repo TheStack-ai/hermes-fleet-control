@@ -1,0 +1,29 @@
+name: Documentation improvement
+description: Improve README, setup, screenshots, troubleshooting, or examples
+title: "docs: "
+labels: [documentation, needs-triage]
+body:
+  - type: textarea
+    id: page
+    attributes:
+      label: Page or section
+      placeholder: README > Quick start, docs/release/macos-release-checklist.md, CONTRIBUTING.md...
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is unclear or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording or structure
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This report does not include raw tokens, credentials, private IDs, signed URLs, or unredacted logs.
+          required: true

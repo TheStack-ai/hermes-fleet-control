@@ -21,10 +21,11 @@ from control.audit_log import DEFAULT_AUDIT_LOG, append_action_entry, build_acti
 from control.gateway_actions import ActionBlocked, execute_plan, plan_action
 from control.auth_health import build_auth_health, inspect_profile_codex_auth
 from control.discovery import auto_discovered_manifest, is_public_default_manifest
+from control.local_mappings import load_profile_map, upsert_profile_mapping
 from control.hermes_profiles import launchd_pid_map, summarize_profile
 from control.manifest import load_manifest
 from control.network_checks import check_discord_network
-from control.paths import auth_repair_script_dir, codex_auth_file, default_manifest_path, hermes_executable, hermes_home, profiles_root, repo_root, user_home, launch_plist_path
+from control.paths import auth_repair_script_dir, codex_auth_file, default_manifest_path, hermes_executable, hermes_home, profiles_root, repo_root, user_home, launch_plist_path, profile_map_path
 from control.redaction import RedactionError, leak_guard, redact_text
 from scripts.launchagent import disable as launchagent_disable, enable as launchagent_enable, install as launchagent_install, launchagent_status, uninstall as launchagent_uninstall, write_plist
 DEFAULT_MANIFEST = default_manifest_path()
@@ -50,7 +51,8 @@ def _should_auto_discover(args: argparse.Namespace, manifest: dict[str, Any]) ->
 def _load_effective_manifest(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
     manifest = load_manifest(Path(args.manifest))
     if _should_auto_discover(args, manifest):
-        discovered = auto_discovered_manifest(hermes_home(), Path(args.profiles_root))
+        mapping = load_profile_map(Path(getattr(args, "map_file", profile_map_path())))
+        discovered = auto_discovered_manifest(hermes_home(), Path(args.profiles_root), profile_map=mapping)
         if discovered:
             return discovered, "auto_discovery"
     return manifest, "manifest"
@@ -69,17 +71,22 @@ def _profile_root_for_item(item: dict[str, Any], args: argparse.Namespace) -> Pa
 
 def build_status(args: argparse.Namespace) -> dict[str, Any]:
     manifest, manifest_source = _load_effective_manifest(args)
-    pid_map = {} if args.profiles_root != str(DEFAULT_PROFILES_ROOT) else launchd_pid_map()
+    use_launchd_pid_map = args.profiles_root == str(DEFAULT_PROFILES_ROOT) and not os.environ.get("HERMES_HOME") and not os.environ.get("HERMES_PROFILES_ROOT")
+    pid_map = launchd_pid_map() if use_launchd_pid_map else None
     servers = []
     for key, server in manifest["servers"].items():
         if args.group and key != args.group:
             continue
         profiles = []
-        counts = {"healthy": 0, "degraded": 0, "stopped": 0, "busy": 0, "unknown": 0}
+        counts = {"healthy": 0, "degraded": 0, "stopped": 0, "busy": 0, "unknown": 0, "unclassified": 0, "inactive": 0, "ignored": 0}
         for item in server.get("profiles", []):
             name = item["profile"]
             profile_root = _profile_root_for_item(item, args)
-            summary = summarize_profile(profile_root, name, launchd_pid_present=pid_map.get(name, True))
+            pid_present = pid_map.get(name, False) if pid_map is not None else True
+            summary = summarize_profile(profile_root, name, launchd_pid_present=pid_present)
+            if item.get("status_override"):
+                summary["status"] = str(item["status_override"])
+                summary["safe_actions"] = []
             summary["auth"] = inspect_profile_codex_auth(profile_root)
             summary["display"] = item.get("display", name)
             summary["critical"] = bool(item.get("critical", False))
@@ -91,6 +98,12 @@ def build_status(args: argparse.Namespace) -> dict[str, Any]:
                 counts["busy"] += 1
             elif status == "stopped":
                 counts["stopped"] += 1
+            elif status == "unclassified":
+                counts["unclassified"] += 1
+            elif status == "inactive":
+                counts["inactive"] += 1
+            elif status == "ignored":
+                counts["ignored"] += 1
             elif status.startswith("degraded"):
                 counts["degraded"] += 1
             else:
@@ -306,6 +319,28 @@ def launchagent_command(args: argparse.Namespace) -> dict[str, Any]:
     return {"ok": True, "generated_at": now_iso(), "launchagent": status}
 
 
+def profile_map_command(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        mapping = upsert_profile_mapping(
+            Path(args.map_file),
+            args.profile,
+            display=args.display,
+            server=args.server,
+            server_display=args.server_display,
+            state=args.state,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__, "message": str(exc)}
+    return {
+        "ok": True,
+        "generated_at": now_iso(),
+        "profile": args.profile,
+        "map_file": str(Path(args.map_file).expanduser()),
+        "mapping": mapping,
+        "message": "Profile classification saved locally. No secrets were read or written.",
+    }
+
+
 def run_watchdog(args: argparse.Namespace) -> dict[str, Any]:
     status = build_status(args)
     actions: list[dict[str, Any]] = []
@@ -340,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--audit-log", default=str(DEFAULT_AUDIT_LOG))
     common.add_argument("--audit-limit", type=int, default=5)
     common.add_argument("--no-auto-discover", action="store_true", help="use the manifest exactly; do not auto-discover local Hermes profiles")
+    common.add_argument("--map-file", default=str(profile_map_path()), help="local profile classification map JSON")
 
     sp = sub.add_parser("status", parents=[common])
     sp.add_argument("--json", action="store_true")
@@ -353,6 +389,15 @@ def main(argv: list[str] | None = None) -> int:
     lp.add_argument("--plist", default=str(launch_plist_path()))
     lp.add_argument("--no-bootstrap", action="store_true")
 
+    mp = sub.add_parser("profile-map")
+    mp.add_argument("--profile", required=True)
+    mp.add_argument("--display")
+    mp.add_argument("--server")
+    mp.add_argument("--server-display")
+    mp.add_argument("--state", choices=["managed", "unclassified", "inactive", "ignored"], default="managed")
+    mp.add_argument("--map-file", default=str(profile_map_path()))
+    mp.add_argument("--json", action="store_true")
+
     wp = sub.add_parser("watchdog", parents=[common])
     wp.add_argument("--policy", choices=["dry-run", "auto"], default="dry-run")
     wp.add_argument("--json", action="store_true")
@@ -360,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     arp = sub.add_parser("auth-repair")
     arp.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
     arp.add_argument("--profiles-root", default=str(DEFAULT_PROFILES_ROOT))
+    arp.add_argument("--map-file", default=str(profile_map_path()))
     arp.add_argument("--no-auto-discover", action="store_true")
     arp.add_argument("--profile", required=True)
     arp.add_argument("--action", dest="auth_action", choices=["reauth", "reauth-manual", "smoke", "restart"], default="reauth")
@@ -384,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
         return print_json({"ok": True, "generated_at": now_iso(), "network": check_discord_network()})
     if args.command == "launchagent":
         return print_json(launchagent_command(args))
+    if args.command == "profile-map":
+        return print_json(profile_map_command(args))
     if args.command == "status":
         return print_json(build_status(args))
     if args.command == "watchdog":

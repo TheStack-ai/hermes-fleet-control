@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest a safer or clearer Fleet Control capability
+title: "feat: "
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator problem would this solve?
+      placeholder: I cannot tell whether an agent is offline because of gateway health or model auth...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the UX, CLI command, or behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - First-run onboarding
+        - Profile mapping
+        - Gateway health
+        - Auth repair
+        - Diagnostics/redaction
+        - macOS app UI
+        - Windows/Linux CLI
+        - Packaging/release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: Could this touch live gateways, secrets, private local state, or external services?
+      placeholder: This should be read-only / this would need preview-first confirmation / this must not print tokens...

@@ -89,12 +89,29 @@ def python_executable() -> str:
 
 
 def auth_repair_script_dir() -> Path:
-    return Path(os.environ.get("HERMES_FLEET_AUTH_REPAIR_DIR") or (repo_root() / "runtime" / "auth-repair")).expanduser()
+    if os.environ.get("HERMES_FLEET_AUTH_REPAIR_DIR"):
+        return Path(os.environ["HERMES_FLEET_AUTH_REPAIR_DIR"]).expanduser()
+    if os.environ.get("HERMES_FLEET_RUNTIME_DIR"):
+        return Path(os.environ["HERMES_FLEET_RUNTIME_DIR"]).expanduser() / "auth-repair"
+    return repo_root() / "runtime" / "auth-repair"
 
 
 def safe_restart_script() -> Path | None:
     override = os.environ.get("HERMES_SAFE_RESTART_SCRIPT")
     return Path(override).expanduser() if override else None
+
+
+def profile_map_path() -> Path:
+    override = os.environ.get("HERMES_FLEET_PROFILE_MAP")
+    if override:
+        return Path(override).expanduser()
+    if platform.system() == "Darwin":
+        return user_home() / "Library" / "Application Support" / "HermesFleetControl" / "profile-map.json"
+    if platform.system() == "Windows":
+        base = os.environ.get("APPDATA")
+        if base:
+            return Path(base) / "HermesFleetControl" / "profile-map.json"
+    return user_home() / ".config" / "hermes-fleet-control" / "profile-map.json"
 
 
 def launch_label() -> str:

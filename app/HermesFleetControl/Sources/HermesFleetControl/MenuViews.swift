@@ -9,6 +9,7 @@ final class FleetViewModel: ObservableObject {
     @Published var isRefreshing = false
     @Published var isPlanningAction = false
     @Published var armedLiveReconnectGroup: String?
+    @Published var armedAutoRecovery = false
     @Published var alertsEnabled: Bool
     @Published var launchAgentState: LaunchAgentState?
 
@@ -24,11 +25,13 @@ final class FleetViewModel: ObservableObject {
 
     func startPolling() {
         guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
         }
+        timer.tolerance = 10
+        pollTimer = timer
     }
 
     func setAlertsEnabled(_ enabled: Bool) {
@@ -83,21 +86,54 @@ final class FleetViewModel: ObservableObject {
     func runWatchdog(policy: String) {
         isPlanningAction = true
         lastError = nil
+        armedAutoRecovery = false
         Task.detached { [cli] in
             do {
                 let result = try cli.watchdog(policy: policy)
                 await MainActor.run {
                     self.lastActionSummary = result.watchdog?.displaySummary ?? (result.ok ? "Watchdog 점검 완료" : "Watchdog 점검 실패")
+                    self.armedAutoRecovery = false
                     self.isPlanningAction = false
                     self.refresh()
                 }
             } catch {
                 await MainActor.run {
                     self.lastError = error.localizedDescription
+                    self.armedAutoRecovery = false
                     self.isPlanningAction = false
                 }
             }
         }
+    }
+
+    func previewAutoRecovery() {
+        isPlanningAction = true
+        lastError = nil
+        armedAutoRecovery = false
+        Task.detached { [cli] in
+            do {
+                let result = try cli.watchdog(policy: "dry-run")
+                let hasTargets = result.watchdog?.actions.contains { action in
+                    action.plan?.targets.isEmpty == false
+                } == true
+                await MainActor.run {
+                    self.lastActionSummary = "Live 실행 전 확인 · " + (result.watchdog?.displaySummary ?? "No recovery needed")
+                    self.armedAutoRecovery = hasTargets
+                    self.isPlanningAction = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.armedAutoRecovery = false
+                    self.isPlanningAction = false
+                }
+            }
+        }
+    }
+
+    func confirmAutoRecovery() {
+        guard armedAutoRecovery else { return }
+        runWatchdog(policy: "auto")
     }
 
     func openAuthRepair(profile: String, action: String) {
@@ -120,7 +156,67 @@ final class FleetViewModel: ObservableObject {
         }
     }
 
+    func mapProfile(profile: String, display: String, server: String? = nil, serverDisplay: String? = nil, state: String = "managed") {
+        isPlanningAction = true
+        lastError = nil
+        Task.detached { [cli] in
+            do {
+                let result = try cli.mapProfile(profile: profile, display: display, server: server, serverDisplay: serverDisplay, state: state)
+                await MainActor.run {
+                    self.lastActionSummary = result.displaySummary
+                    self.isPlanningAction = false
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    self.isPlanningAction = false
+                }
+            }
+        }
+    }
+
+    func copyDiagnostics() {
+        guard let snapshot else {
+            lastError = "진단을 복사하려면 먼저 상태를 새로고침해줘."
+            return
+        }
+        let summary = snapshot.servers.reduce((healthy: 0, degraded: 0, stopped: 0, busy: 0, unknown: 0, unclassified: 0, inactive: 0, ignored: 0)) { partial, server in
+            (
+                healthy: partial.healthy + server.summary.healthy,
+                degraded: partial.degraded + server.summary.degraded,
+                stopped: partial.stopped + server.summary.stopped,
+                busy: partial.busy + server.summary.busy,
+                unknown: partial.unknown + server.summary.unknown,
+                unclassified: partial.unclassified + server.summary.unclassifiedCount,
+                inactive: partial.inactive + server.summary.inactiveCount,
+                ignored: partial.ignored + server.summary.ignoredCount
+            )
+        }
+        let diagnostics = """
+        Hermes Fleet Control diagnostics
+        generated_at: \(snapshot.generatedAt)
+        headline: \(snapshot.headline)
+        servers: \(snapshot.servers.count)
+        ready: \(summary.healthy)
+        degraded: \(summary.degraded)
+        stopped: \(summary.stopped)
+        busy: \(summary.busy)
+        unknown: \(summary.unknown)
+        unclassified: \(summary.unclassified)
+        inactive: \(summary.inactive)
+        ignored: \(summary.ignored)
+        auth_relogin_required: \(snapshot.reloginCount)
+        network_skipped: \(snapshot.network.skipped == true)
+        note: names, tokens, private IDs, and raw logs are not included.
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostics, forType: .string)
+        lastActionSummary = "진단 요약 복사 완료 · Copy Diagnostics"
+    }
+
     func refresh() {
+        guard !isRefreshing else { return }
         isRefreshing = true
         lastError = nil
         Task.detached { [cli] in
@@ -232,8 +328,9 @@ final class FleetViewModel: ObservableObject {
 struct FleetMenuView: View {
     @ObservedObject var viewModel: FleetViewModel
 
+    private let docsURL = URL(string: "https://hermes-agent.nousresearch.com/docs")!
+    private let repoURL = URL(string: "https://github.com/TheStack-ai/hermes-fleet-control")!
     private let sponsorURL = URL(string: "https://github.com/sponsors/TheStack-ai")!
-    private let repoURL = URL(string: "https://github.com/TheStack-ai")!
 
     var body: some View {
         VStack(spacing: 0) {
@@ -242,6 +339,7 @@ struct FleetMenuView: View {
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 12) {
                     attentionSection
+                    classificationSection
                     fleetSection
                     operationsSection
                     supportSection
@@ -306,6 +404,7 @@ struct FleetMenuView: View {
                 HStack(spacing: 8) {
                     MetricPill(title: "Ready", value: "\(snapshot.readyCount)", systemImage: "checkmark.seal.fill", tint: .green)
                     MetricPill(title: "Gateway", value: "\(snapshot.attentionCount)", systemImage: "wrench.and.screwdriver.fill", tint: snapshot.attentionCount > 0 ? .orange : .green)
+                    MetricPill(title: "Map", value: "\(snapshot.unclassifiedCount)", systemImage: "questionmark.folder.fill", tint: snapshot.unclassifiedCount > 0 ? .orange : .green)
                     MetricPill(title: "Auth", value: "\(snapshot.reloginCount)", systemImage: "key.fill", tint: snapshot.reloginCount > 0 ? .orange : .green)
                 }
             }
@@ -354,10 +453,43 @@ struct FleetMenuView: View {
     }
 
     @ViewBuilder
+    private var classificationSection: some View {
+        if let snapshot = viewModel.snapshot, !snapshot.classificationProfiles.isEmpty {
+            PremiumCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("미분류 / 비활성 프로필", systemImage: "questionmark.folder.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("자동탐지된 프로필을 한 번만 서버/이름에 매핑하거나 비활성/숨김 처리하면 이후 dashboard가 정확히 잡아.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(snapshot.classificationProfiles) { profile in
+                        ProfileMappingEditor(profile: profile, viewModel: viewModel)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private var fleetSection: some View {
         if let snapshot = viewModel.snapshot {
-            VStack(alignment: .leading, spacing: 8) {
-                SectionTitle("Profiles", subtitle: "Live status · visible by default")
+            if snapshot.servers.isEmpty {
+                PremiumCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Hermes 프로필을 찾지 못했어", systemImage: "sparkles.rectangle.stack")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("Fleet Control은 로컬 ~/.hermes와 ~/.hermes/profiles/*만 읽어. 아직 Hermes가 설치되지 않았거나 다른 HERMES_HOME을 쓰는 상태면 Gateway offline이 아니라 setup이 필요한 상태야.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            ActionChip("Hermes Docs", "Setup", "book") { openURL(docsURL) }
+                            ActionChip("다시 확인", "Refresh", "arrow.clockwise") { viewModel.refresh() }
+                        }
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionTitle("Profiles", subtitle: "Live status · visible by default")
                 ForEach(snapshot.servers) { server in
                     PremiumCard {
                         VStack(alignment: .leading, spacing: 10) {
@@ -406,6 +538,7 @@ struct FleetMenuView: View {
                         }
                     }
                     .disabled(viewModel.isPlanningAction)
+                }
                 }
             }
         } else if let error = viewModel.lastError {
@@ -528,17 +661,18 @@ struct FleetMenuView: View {
                         ActionTile(title: viewModel.alertsEnabled ? "알림 끄기" : "알림 켜기", subtitle: viewModel.alertsEnabled ? "Alerts Off" : "Alerts On", systemImage: viewModel.alertsEnabled ? "bell.slash" : "bell.badge") {
                             viewModel.setAlertsEnabled(!viewModel.alertsEnabled)
                         }
-                        ActionTile(title: "안전점검", subtitle: "Watchdog Preview", systemImage: "shield.lefthalf.filled") {
-                            viewModel.runWatchdog(policy: "dry-run")
-                        }
-                    }
-                    HStack(spacing: 8) {
-                        ActionTile(title: "자동복구", subtitle: "Run Recovery", systemImage: "shield.checkered") {
-                            viewModel.runWatchdog(policy: "auto")
-                        }
                         ActionTile(title: "새로고침", subtitle: "Refresh Now", systemImage: "arrow.clockwise.circle") {
                             viewModel.refresh()
                         }
+                    }
+                    HStack(spacing: 8) {
+                        ActionTile(title: "복구 미리보기", subtitle: "Preview Recovery", systemImage: "shield.lefthalf.filled") {
+                            viewModel.previewAutoRecovery()
+                        }
+                        ActionTile(title: viewModel.armedAutoRecovery ? "확인 후 자동복구" : "자동복구 대기", subtitle: viewModel.armedAutoRecovery ? "Confirm Run" : "Preview First", systemImage: viewModel.armedAutoRecovery ? "shield.checkered" : "lock.shield") {
+                            viewModel.confirmAutoRecovery()
+                        }
+                        .disabled(!viewModel.armedAutoRecovery)
                     }
                     DisclosureGroup {
                         VStack(alignment: .leading, spacing: 8) {
@@ -564,24 +698,33 @@ struct FleetMenuView: View {
 
     private var supportSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionTitle("About", subtitle: "Project links")
+            SectionTitle("Help & Support", subtitle: "Guide · diagnostics · sponsor")
             PremiumCard {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "heart.circle.fill")
-                            .font(.system(size: 24, weight: .semibold))
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "questionmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
                             .symbolRenderingMode(.hierarchical)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("후원하기 · Sponsor")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text("GitHub Sponsors와 프로젝트 프로필")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                            .foregroundStyle(.secondary)
+                        Text("문제 해결 바로가기")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("docs · logs · profile map · diagnostics")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 0)
                     }
-                    HStack(spacing: 8) {
-                        ActionChip("Sponsor", "GitHub", "heart.fill") { openURL(sponsorURL) }
-                        ActionChip("Profile", "GitHub", "person.crop.circle") { openURL(repoURL) }
+
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
+                        SupportActionChip("Guide", "Docs", "book") { openURL(docsURL) }
+                        SupportActionChip("Logs", "Folder", "doc.text.magnifyingglass") { openApplicationSupport(subpath: "runtime/logs", isDirectory: true) }
+                        SupportActionChip("Copy", "Diag", "doc.on.doc") { viewModel.copyDiagnostics() }
+                        SupportActionChip("Profiles", "Map", "folder.badge.gearshape") { openApplicationSupport(subpath: "profile-map.json", isDirectory: false, defaultFileContents: "{}\n") }
+                        SupportActionChip("Source", "GitHub", "chevron.left.forwardslash.chevron.right") { openURL(repoURL) }
+                        SupportActionChip("Sponsor", "Support", "heart.fill") { openURL(sponsorURL) }
                     }
                 }
             }
@@ -622,20 +765,20 @@ struct FleetMenuView: View {
     private var headerSymbol: String {
         guard let snapshot = viewModel.snapshot else { return "bolt.circle" }
         if snapshot.servers.contains(where: { $0.summary.stopped > 0 }) { return "xmark.octagon.fill" }
-        if snapshot.hasAttention { return "exclamationmark.triangle.fill" }
+        if snapshot.hasAttention || snapshot.unclassifiedCount > 0 { return "exclamationmark.triangle.fill" }
         return "bolt.circle.fill"
     }
 
     private var headerTint: Color {
         guard let snapshot = viewModel.snapshot else { return .blue }
         if snapshot.servers.contains(where: { $0.summary.stopped > 0 }) { return .red }
-        if snapshot.hasAttention { return .orange }
+        if snapshot.hasAttention || snapshot.unclassifiedCount > 0 { return .orange }
         return .green
     }
 
     private func serverTint(_ server: FleetServer) -> Color {
         if server.summary.stopped > 0 { return .red }
-        if server.summary.degraded > 0 || server.summary.unknown > 0 { return .orange }
+        if server.summary.degraded > 0 || server.summary.unknown > 0 || server.summary.unclassifiedCount > 0 { return .orange }
         if server.summary.busy > 0 { return .blue }
         return .green
     }
@@ -644,9 +787,10 @@ struct FleetMenuView: View {
         if profile.auth?.reloginRequired == true { return .orange }
         switch profile.status {
         case .healthy: return .green
-        case .degradedBackoff, .unknown: return .orange
+        case .degradedBackoff, .unknown, .unclassified: return .orange
         case .busy: return .blue
         case .stopped: return .red
+        case .inactive, .ignored: return .secondary
         }
     }
 
@@ -667,6 +811,9 @@ struct FleetMenuView: View {
         case .stopped: return "Gateway 꺼짐 · Offline"
         case .degradedBackoff: return "재연결 대기 · Backoff"
         case .unknown: return "상태 확인 필요 · Unknown"
+        case .unclassified: return "서버/이름 매핑 필요 · Unclassified"
+        case .inactive: return "의도적으로 비활성 · Inactive"
+        case .ignored: return "숨김 처리됨 · Ignored"
         case .busy: return "작업중 · Busy"
         case .healthy: return "정상 · Ready"
         }
@@ -674,6 +821,88 @@ struct FleetMenuView: View {
 
     private func openURL(_ url: URL) {
         NSWorkspace.shared.open(url)
+    }
+
+    private func openApplicationSupport(subpath: String, isDirectory: Bool = true, defaultFileContents: String? = nil) {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let appDir = base.appendingPathComponent("HermesFleetControl", isDirectory: true)
+        let target = appDir.appendingPathComponent(subpath, isDirectory: isDirectory)
+        let parent = isDirectory ? target : target.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        if !isDirectory, !FileManager.default.fileExists(atPath: target.path), let defaultFileContents {
+            try? defaultFileContents.write(to: target, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.open(target)
+    }
+}
+
+private struct ProfileMappingEditor: View {
+    let profile: FleetProfile
+    @ObservedObject var viewModel: FleetViewModel
+    @State private var displayName: String
+    @State private var groupName: String
+
+    init(profile: FleetProfile, viewModel: FleetViewModel) {
+        self.profile = profile
+        self.viewModel = viewModel
+        _displayName = State(initialValue: profile.display ?? profile.profile)
+        _groupName = State(initialValue: "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: profile.status.symbolName)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(profile.status == .inactive ? Color.secondary : Color.orange)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profile.profile)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(profile.status.shortLabel + " · " + profile.lastSignal)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            TextField("Profile display name", text: $displayName)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+            TextField("Group name, e.g. Work Agents", text: $groupName)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+            HStack(spacing: 8) {
+                ActionChip("그룹 지정", "Save", "folder.badge.gearshape") {
+                    viewModel.mapProfile(profile: profile.profile, display: cleanDisplayName, server: cleanGroupKey, serverDisplay: cleanGroupName, state: "managed")
+                }
+                .disabled(cleanGroupName.isEmpty)
+                ActionChip("비활성", "Inactive", "pause.circle") {
+                    viewModel.mapProfile(profile: profile.profile, display: cleanDisplayName, state: "inactive")
+                }
+                ActionChip("숨김", "Ignore", "eye.slash") {
+                    viewModel.mapProfile(profile: profile.profile, display: cleanDisplayName, state: "ignored")
+                }
+            }
+        }
+        .padding(10)
+        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var cleanDisplayName: String {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? profile.profile : trimmed
+    }
+
+    private var cleanGroupName: String {
+        groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var cleanGroupKey: String {
+        let lowered = cleanGroupName.lowercased()
+        let scalars = lowered.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : "-" }
+        let collapsed = String(scalars).split(separator: "-").joined(separator: "-")
+        return collapsed.isEmpty ? "local" : collapsed
     }
 }
 
@@ -775,6 +1004,47 @@ private struct ActionTile: View {
             .padding(12)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.primary.opacity(0.08), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(subtitle)")
+    }
+}
+
+private struct SupportActionChip: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let action: () -> Void
+
+    init(_ title: String, _ subtitle: String, _ systemImage: String, action: @escaping () -> Void) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.primary.opacity(0.08), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(title), \(subtitle)")

@@ -6,6 +6,9 @@ enum FleetStatus: String, Codable {
     case busy
     case stopped
     case unknown
+    case unclassified
+    case inactive
+    case ignored
 
     var symbolName: String {
         switch self {
@@ -14,6 +17,9 @@ enum FleetStatus: String, Codable {
         case .busy: return "clock.badge"
         case .stopped: return "xmark.octagon.fill"
         case .unknown: return "questionmark.diamond.fill"
+        case .unclassified: return "questionmark.folder.fill"
+        case .inactive: return "pause.circle.fill"
+        case .ignored: return "eye.slash.fill"
         }
     }
 
@@ -24,6 +30,9 @@ enum FleetStatus: String, Codable {
         case .busy: return "작업 중"
         case .stopped: return "오프라인"
         case .unknown: return "확인 필요"
+        case .unclassified: return "미분류"
+        case .inactive: return "비활성"
+        case .ignored: return "숨김"
         }
     }
 }
@@ -46,13 +55,17 @@ struct FleetSnapshot: Codable {
     }
 
     var headline: String {
+        if servers.isEmpty {
+            return "Hermes 프로필 없음 · Setup needed"
+        }
         let problemCount = servers.reduce(0) { partial, server in
             partial + server.summary.degraded + server.summary.stopped + server.summary.unknown
         }
-        if problemCount == 0 && reloginCount == 0 {
+        if problemCount == 0 && reloginCount == 0 && unclassifiedCount == 0 {
             return "전체 정상 · All systems ready"
         }
         if problemCount == 0 {
+            if unclassifiedCount > 0 { return "Gateway 정상 · 미분류 \(unclassifiedCount)개" }
             return "Gateway 정상 · 인증 \(reloginCount)개 확인"
         }
         return "확인 필요 · \(problemCount)개 프로필"
@@ -64,6 +77,10 @@ struct FleetSnapshot: Codable {
 
     var attentionCount: Int {
         servers.reduce(0) { $0 + $1.summary.degraded + $1.summary.stopped + $1.summary.unknown }
+    }
+
+    var unclassifiedCount: Int {
+        servers.reduce(0) { $0 + $1.summary.unclassifiedCount }
     }
 
     var reloginCount: Int {
@@ -80,7 +97,7 @@ struct FleetSnapshot: Codable {
                 switch profile.status {
                 case .degradedBackoff, .stopped, .unknown:
                     return true
-                case .healthy, .busy:
+                case .healthy, .busy, .unclassified, .inactive, .ignored:
                     return false
                 }
             }()
@@ -92,7 +109,18 @@ struct FleetSnapshot: Codable {
             switch profile.status {
             case .degradedBackoff, .stopped, .unknown:
                 return true
-            case .healthy, .busy:
+            case .healthy, .busy, .unclassified, .inactive, .ignored:
+                return false
+            }
+        }
+    }
+
+    var classificationProfiles: [FleetProfile] {
+        servers.flatMap { $0.profiles }.filter { profile in
+            switch profile.status {
+            case .unclassified, .inactive:
+                return true
+            case .healthy, .degradedBackoff, .busy, .stopped, .unknown, .ignored:
                 return false
             }
         }
@@ -240,24 +268,34 @@ struct ServerSummary: Codable {
     let stopped: Int
     let busy: Int
     let unknown: Int
+    let unclassified: Int?
+    let inactive: Int?
+    let ignored: Int?
+
+    var unclassifiedCount: Int { unclassified ?? 0 }
+    var inactiveCount: Int { inactive ?? 0 }
+    var ignoredCount: Int { ignored ?? 0 }
 
     var isHealthy: Bool {
-        degraded == 0 && stopped == 0 && unknown == 0
+        degraded == 0 && stopped == 0 && unknown == 0 && unclassifiedCount == 0
     }
 
     var symbolName: String {
         if stopped > 0 { return "xmark.octagon.fill" }
-        if degraded > 0 || unknown > 0 { return "exclamationmark.triangle.fill" }
+        if degraded > 0 || unknown > 0 || unclassifiedCount > 0 { return "exclamationmark.triangle.fill" }
         if busy > 0 { return "clock.badge" }
         return "checkmark.seal.fill"
     }
 
     var compactLine: String {
-        "정상 \(healthy) · 주의 \(degraded) · 오프라인 \(stopped) · 작업중 \(busy) · 미확인 \(unknown)"
+        "정상 \(healthy) · 주의 \(degraded) · 오프라인 \(stopped) · 작업중 \(busy) · 미확인 \(unknown) · 미분류 \(unclassifiedCount) · 비활성 \(inactiveCount)"
     }
 
     var premiumLine: String {
         if isHealthy { return "모든 프로필 정상" }
+        if degraded + stopped + unknown == 0 {
+            return "정상 \(healthy) · 미분류 \(unclassifiedCount) · 비활성 \(inactiveCount)"
+        }
         return "정상 \(healthy) · 조치필요 \(degraded + stopped + unknown) · 작업중 \(busy)"
     }
 }
@@ -438,5 +476,26 @@ struct AuthRepairResult: Codable {
     var displaySummary: String {
         let opened = openedTerminal == true ? "opened Terminal" : "prepared"
         return "Auth Repair · \(opened) · \(profile ?? "profile") · \(action ?? "action")"
+    }
+}
+
+struct ProfileMapResult: Codable {
+    let ok: Bool
+    let profile: String?
+    let mapFile: String?
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case profile
+        case mapFile = "map_file"
+        case message
+    }
+
+    var displaySummary: String {
+        if ok {
+            return "프로필 분류 저장 · \(profile ?? "profile")"
+        }
+        return message ?? "프로필 분류 저장 실패"
     }
 }

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from .redaction import RedactionError, leak_guard, redact_text
 
-DEFAULT_AUDIT_LOG = Path("runtime/audit/actions.jsonl")
+DEFAULT_AUDIT_LOG = Path(
+    os.environ.get("HERMES_FLEET_AUDIT_LOG")
+    or (Path(os.environ["HERMES_FLEET_RUNTIME_DIR"]) / "audit" / "actions.jsonl" if os.environ.get("HERMES_FLEET_RUNTIME_DIR") else "runtime/audit/actions.jsonl")
+)
 MAX_MESSAGE_CHARS = 500
 
 

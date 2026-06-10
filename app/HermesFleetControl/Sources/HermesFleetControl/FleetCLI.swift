@@ -19,7 +19,13 @@ struct FleetCLI {
         }
         let bundleURL = Bundle.main.bundleURL
         if bundleURL.pathExtension == "app" {
-            // Packaged as <repo>/dist/HermesFleetControl.app during local builds.
+            if let resources = Bundle.main.resourceURL {
+                let bundledCLI = resources.appendingPathComponent("control/fleetctl.py")
+                if FileManager.default.fileExists(atPath: bundledCLI.path) {
+                    return resources
+                }
+            }
+            // Development fallback: packaged as <repo>/dist/HermesFleetControl.app.
             return bundleURL.deletingLastPathComponent().deletingLastPathComponent()
         }
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -86,6 +92,25 @@ struct FleetCLI {
         return try JSONDecoder().decode(AuthRepairResult.self, from: data)
     }
 
+    func mapProfile(profile: String, display: String, server: String? = nil, serverDisplay: String? = nil, state: String = "managed") throws -> ProfileMapResult {
+        var args = [
+            repoRoot.appendingPathComponent("control/fleetctl.py").path,
+            "profile-map",
+            "--profile", profile,
+            "--display", display,
+            "--state", state,
+            "--json"
+        ]
+        if let server, !server.isEmpty {
+            args.append(contentsOf: ["--server", server])
+        }
+        if let serverDisplay, !serverDisplay.isEmpty {
+            args.append(contentsOf: ["--server-display", serverDisplay])
+        }
+        let data = try run(args: args)
+        return try JSONDecoder().decode(ProfileMapResult.self, from: data)
+    }
+
     private func reconnect(group: String, degradedOnly: Bool, dryRun: Bool) throws -> FleetActionResult {
         var args = [
             repoRoot.appendingPathComponent("control/fleetctl.py").path,
@@ -113,6 +138,15 @@ struct FleetCLI {
 
         var environment = ProcessInfo.processInfo.environment
         environment["HERMES_FLEET_ROOT"] = repoRoot.path
+        environment["HERMES_FLEET_APP_PATH"] = Bundle.main.bundleURL.path
+        if environment["HERMES_FLEET_RUNTIME_DIR"] == nil {
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            if let runtimeRoot = appSupport?.appendingPathComponent("HermesFleetControl", isDirectory: true).appendingPathComponent("runtime", isDirectory: true) {
+                environment["HERMES_FLEET_RUNTIME_DIR"] = runtimeRoot.path
+                environment["HERMES_FLEET_AUTH_REPAIR_DIR"] = runtimeRoot.appendingPathComponent("auth-repair", isDirectory: true).path
+                environment["HERMES_FLEET_AUDIT_LOG"] = runtimeRoot.appendingPathComponent("audit/actions.jsonl").path
+            }
+        }
         process.environment = environment
 
         let stdout = Pipe()
@@ -123,11 +157,24 @@ struct FleetCLI {
         process.waitUntilExit()
 
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
         if process.terminationStatus != 0 {
-            let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
-            let message = String(data: errorData, encoding: .utf8) ?? "fleetctl failed"
+            let stderrText = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let stdoutText = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let message = FleetCLI.errorMessage(stderrText: stderrText, stdoutText: stdoutText)
             throw NSError(domain: "FleetCLI", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
         }
         return data
+    }
+
+    private static func errorMessage(stderrText: String, stdoutText: String) -> String {
+        if !stderrText.isEmpty { return stderrText }
+        if let jsonData = stdoutText.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            if let message = object["message"] as? String, !message.isEmpty { return message }
+            if let error = object["error"] as? String, !error.isEmpty { return error }
+        }
+        if !stdoutText.isEmpty { return stdoutText }
+        return "fleetctl failed without an error message"
     }
 }

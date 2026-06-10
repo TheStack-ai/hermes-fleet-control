@@ -9,15 +9,17 @@ def test_redacts_discord_tokens_private_ids_and_signed_urls():
         "ABCDEF",
         "abcdefghijklmnopqrstuvwxyz1",
     ])
-    raw = f"bot={raw_token} id=123456789012345678 s" + "ig=https://x.test?a=1&to" + "ken=secretvalue"
+    raw = f"bot={raw_token} id=123456789012345678 Connected as PrivateBot#1234 s" + "ig=https://x.test?a=1&to" + "ken=secretvalue"
 
     redacted = redact_text(raw)
 
     assert "ABCDEFGHIJKLMNOPQRSTUVWX" not in redacted
     assert "123456789012345678" not in redacted
+    assert "PrivateBot#1234" not in redacted
     assert "secretvalue" not in redacted
     assert "[REDACTED_TOKEN]" in redacted
     assert "[REDACTED_ID]" in redacted
+    assert "[REDACTED_DISCORD_HANDLE]" in redacted
     assert "[REDACTED_SIGNED_PARAM]" in redacted
 
 

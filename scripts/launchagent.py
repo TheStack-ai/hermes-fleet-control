@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import plistlib
 import subprocess
@@ -15,10 +16,11 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
 from control.paths import launch_label, launch_plist_path, repo_root
 
 ROOT = repo_root()
-APP_PATH = ROOT / "dist" / "HermesFleetControl.app"
+DEFAULT_INSTALLED_APP = Path("/Applications/HermesFleetControl.app")
+APP_PATH = Path(os.environ.get("HERMES_FLEET_APP_PATH") or (DEFAULT_INSTALLED_APP if DEFAULT_INSTALLED_APP.exists() else ROOT / "dist" / "HermesFleetControl.app")).expanduser()
 LABEL = launch_label()
 PLIST_PATH = launch_plist_path()
-LOG_DIR = ROOT / "runtime" / "logs"
+LOG_DIR = Path(os.environ.get("HERMES_FLEET_RUNTIME_DIR") or (ROOT / "runtime")) / "logs"
 
 
 def _is_macos() -> bool:

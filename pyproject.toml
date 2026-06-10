@@ -5,6 +5,9 @@ description = "Local-first control center for Hermes Agent profile fleets"
 requires-python = ">=3.10"
 readme = "README.md"
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
