@@ -17,6 +17,12 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> ·
+  <a href="README.ko.md">한국어</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#macos-menu-bar-app">macOS app</a> ·
   <a href="#why-it-exists">Why</a> ·
